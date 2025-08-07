@@ -71,7 +71,6 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
   const handsRef = useRef<any>(null);
 
   // Configuration constants
-  const ANALYSIS_INTERVAL = 100; // Analyze every 100ms for responsiveness
   const STABILITY_DURATION = 1000; // Require 1 second of stability
   const PROCESSING_COOLDOWN = 1500; // 1.5 second cooldown after processing
   const CIRCLE_RADIUS = 80; // Radius of the detection circle in pixels
@@ -877,20 +876,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
                   <p className="text-gray-300">
                     {handState.isStable ? 'Keep steady!' : 'Hold position'}
                   </p>
-                  {/* Compact Debug info */}
-                  <p className="text-gray-400 text-xs">
-                    Stable: {handState.isStable ? 'Yes' : 'No'} | 
-                    {Math.round(stableTime / 100)}/10
-                  </p>
-                  {handState.fingerStates && (
-                    <p className="text-gray-400 text-xs">
-                      T:{handState.fingerStates.thumb ? 'O' : 'C'} 
-                      I:{handState.fingerStates.index ? 'O' : 'C'} 
-                      M:{handState.fingerStates.middle ? 'O' : 'C'} 
-                      R:{handState.fingerStates.ring ? 'O' : 'C'} 
-                      P:{handState.fingerStates.pinky ? 'O' : 'C'}
-                    </p>
-                  )}
+
                 </div>
               ) : (
                 <p className="text-gray-300">Place hand in circle</p>
