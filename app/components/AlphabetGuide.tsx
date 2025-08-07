@@ -157,7 +157,6 @@ export default function AlphabetGuide({ currentLetter }: AlphabetGuideProps) {
       )}
 
       <AlphabetGrid currentLetter={currentLetter} />
-      <TipsSection />
     </div>
   );
 }
@@ -229,16 +228,4 @@ function AlphabetGrid({ currentLetter }: AlphabetGridProps) {
   );
 }
 
-function TipsSection() {
-  return (
-    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-      <h4 className="font-semibold text-yellow-800 mb-2">💡 Tips for Success</h4>
-      <ul className="text-sm text-yellow-700 space-y-1">
-        <li>• Make sure your hand is clearly visible to the camera</li>
-        <li>• Keep your hand steady and well-lit</li>
-        <li>• Practice the sign a few times before trying</li>
-        <li>• Position your hand about 12-18 inches from the camera</li>
-      </ul>
-    </div>
-  );
-} 
+ 
