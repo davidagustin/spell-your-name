@@ -428,12 +428,19 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
       pinky: false
     };
 
-    // Thumb detection - check if thumb tip is above the MCP joint
+    // Thumb detection - improved logic for better closed state detection
     const thumbTip = landmarks[4];
     const thumbMCP = landmarks[2];
     const thumbIP = landmarks[3];
-    // Thumb is open if tip is above MCP joint and extended
-    fingerStates.thumb = thumbTip.y < thumbMCP.y && thumbTip.y < thumbIP.y;
+    const wrist = landmarks[0];
+    
+    // Calculate thumb extension relative to wrist
+    const thumbExtension = Math.abs(thumbTip.x - wrist.x) + Math.abs(thumbTip.y - wrist.y);
+    const mcpExtension = Math.abs(thumbMCP.x - wrist.x) + Math.abs(thumbMCP.y - wrist.y);
+    
+    // Thumb is open if it's significantly extended beyond the MCP joint
+    // Use a more lenient threshold for closed state detection
+    fingerStates.thumb = thumbExtension > mcpExtension * 1.2;
 
     // Index finger detection - check if tip is above PIP joint
     const indexTip = landmarks[8];
