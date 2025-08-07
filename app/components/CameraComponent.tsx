@@ -72,7 +72,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
 
   // Configuration constants
   const ANALYSIS_INTERVAL = 100; // Analyze every 100ms for responsiveness
-  const STABILITY_DURATION = 1000; // Require 1 second of stability (reduced for responsiveness)
+  const STABILITY_DURATION = 1000; // Require 1 second of stability
   const PROCESSING_COOLDOWN = 1500; // 1.5 second cooldown after processing
   const CIRCLE_RADIUS = 80; // Radius of the detection circle in pixels
 
@@ -151,8 +151,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
           minTrackingConfidence: 0.5
         });
       } catch (optionsError) {
-        console.warn('Failed to set MediaPipe options, using defaults:', optionsError);
-        // Continue with default options
+        // Continue with default options if custom options fail
       }
 
       hands.onResults((results) => {
@@ -249,7 +248,6 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
           try {
             await handsRef.current.send({ image: videoRef.current });
           } catch (sendError) {
-            console.warn('MediaPipe send error:', sendError);
             // Continue processing even if send fails
           }
         }
@@ -259,7 +257,6 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
       animationFrameRef.current = requestAnimationFrame(processFrame);
 
     } catch (error) {
-      console.error('MediaPipe initialization failed:', error);
       setError('Advanced hand tracking unavailable. Using basic detection.');
       
       // Fallback to basic hand detection
@@ -527,7 +524,6 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
       
       // Check if stable long enough and gesture is correct
       if (stableDuration >= STABILITY_DURATION && isCorrectGesture(handState.fingerStates)) {
-        console.log('✅ Correct gesture detected! Advancing to next letter...');
         setIsProcessing(true);
         onCorrectGesture();
         
@@ -609,7 +605,6 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
         await initializeMediaPipe();
         
       } catch (error) {
-        console.warn('Camera initialization failed:', error);
         setError('Failed to initialize camera. Please check permissions and try again.');
         setIsCameraActive(false);
       } finally {
