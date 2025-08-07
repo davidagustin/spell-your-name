@@ -1,82 +1,6 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { evaluateHandGesture, HandGestureData, LLMEvaluationResult } from '../services/llmEvaluation';
-
-// Custom hook to suppress WebGL console spam
-const useConsoleSuppression = () => {
-  const originalWarnRef = useRef<typeof console.warn | null>(null);
-  const originalErrorRef = useRef<typeof console.error | null>(null);
-  const isSuppressedRef = useRef(false);
-
-  const suppressConsole = useCallback(() => {
-    if (isSuppressedRef.current) return;
-    
-    originalWarnRef.current = console.warn;
-    originalErrorRef.current = console.error;
-    
-    console.warn = (...args) => {
-      const message = args[0];
-      if (typeof message === 'string' && (
-        message.includes('WebGL') || 
-        message.includes('OpenGL') || 
-        message.includes('gl_context') ||
-        message.includes('hands soluti') ||
-        message.includes('simd wasm bin.js') ||
-        message.includes('WebGL context') ||
-        message.includes('disabled') ||
-        message.includes('destroyed') ||
-        message.includes('created') ||
-        message.includes('overflowing')
-      )) {
-        return; // Suppress WebGL-related messages
-      }
-      originalWarnRef.current?.apply(console, args);
-    };
-    
-    console.error = (...args) => {
-      const message = args[0];
-      if (typeof message === 'string' && (
-        message.includes('WebGL') || 
-        message.includes('OpenGL') || 
-        message.includes('gl_context') ||
-        message.includes('hands soluti') ||
-        message.includes('simd wasm bin.js') ||
-        message.includes('WebGL context') ||
-        message.includes('disabled') ||
-        message.includes('destroyed') ||
-        message.includes('created') ||
-        message.includes('overflowing')
-      )) {
-        return; // Suppress WebGL-related messages
-      }
-      originalErrorRef.current?.apply(console, args);
-    };
-    
-    isSuppressedRef.current = true;
-  }, []);
-
-  const restoreConsole = useCallback(() => {
-    if (!isSuppressedRef.current) return;
-    
-    if (originalWarnRef.current) {
-      console.warn = originalWarnRef.current;
-    }
-    if (originalErrorRef.current) {
-      console.error = originalErrorRef.current;
-    }
-    
-    isSuppressedRef.current = false;
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      restoreConsole();
-    };
-  }, [restoreConsole]);
-
-  return { suppressConsole, restoreConsole };
-};
 
 interface CameraComponentProps {
   targetLetter: string;
@@ -84,520 +8,548 @@ interface CameraComponentProps {
   isActive: boolean;
 }
 
-interface HandLandmark {
-  x: number;
-  y: number;
-  z: number;
-}
-
-interface GestureAnalysis {
-  letter: string;
+interface HandState {
+  isInCircle: boolean;
+  fingerCount: number;
   confidence: number;
-  fingerStates: {
-    thumb: { extended: boolean; angle: number };
-    index: { extended: boolean; angle: number };
-    middle: { extended: boolean; angle: number };
-    ring: { extended: boolean; angle: number };
-    pinky: { extended: boolean; angle: number };
+  isStable: boolean;
+  landmarks?: any[];
+  fingerStates?: {
+    thumb: boolean;
+    index: boolean;
+    middle: boolean;
+    ring: boolean;
+    pinky: boolean;
   };
-  handOrientation: string;
-  stability: { isStable: boolean; score: number };
 }
 
+interface FingerGuide {
+  thumb: boolean;
+  index: boolean;
+  middle: boolean;
+  ring: boolean;
+  pinky: boolean;
+}
+
+/**
+ * CameraComponent - Hand gesture recognition component using MediaPipe
+ * 
+ * Features:
+ * - Real-time hand tracking with MediaPipe
+ * - Circle-based hand detection
+ * - Finger state detection (open/closed)
+ * - Gesture stability validation
+ * - Full screen mode support
+ * - Visual feedback with colored landmarks and connections
+ * 
+ * @param targetLetter - The target ASL letter to recognize
+ * @param onCorrectGesture - Callback when correct gesture is detected
+ * @param isActive - Whether the camera should be active
+ */
 export default function CameraComponent({ targetLetter, onCorrectGesture, isActive }: CameraComponentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [currentAnalysis, setCurrentAnalysis] = useState<GestureAnalysis | null>(null);
-  const [isEvaluating, setIsEvaluating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [stableFrames, setStableFrames] = useState(0);
-  const [llmResult, setLlmResult] = useState<LLMEvaluationResult | null>(null);
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [handState, setHandState] = useState<HandState>({
+    isInCircle: false,
+    fingerCount: 0,
+    confidence: 0,
+    isStable: false
+  });
+  const [stableTime, setStableTime] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isFullScreen, setIsFullScreen] = useState(false);
   
-  // Performance optimization refs
-  const previousLandmarksRef = useRef<HandLandmark[] | null>(null);
-  const lastAnalysisTimeRef = useRef(0);
-  const lastDrawTimeRef = useRef(0);
-  const frameCountRef = useRef(0);
-  const handsRef = useRef<any>(null);
-  const cameraRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  
-  // Console suppression hook
-  const { suppressConsole, restoreConsole } = useConsoleSuppression();
+  const isInitializingRef = useRef(false);
+  const animationFrameRef = useRef<number | null>(null);
+  const lastHandStateRef = useRef<HandState | null>(null);
+  const stableStartTimeRef = useRef<number | null>(null);
+  const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const handsRef = useRef<any>(null);
 
-  // Optimized stability check with debouncing
-  const isHandStable = useCallback((currentLandmarks: HandLandmark[], previousLandmarks: HandLandmark[] | null): boolean => {
-    if (!previousLandmarks) return false;
-    
-    let totalMovement = 0;
-    const keyPoints = [0, 4, 8, 12, 16, 20]; // Wrist and fingertips
-    
-    for (const index of keyPoints) {
-      const current = currentLandmarks[index];
-      const previous = previousLandmarks[index];
-      
-      const movement = Math.sqrt(
-        Math.pow(current.x - previous.x, 2) + 
-        Math.pow(current.y - previous.y, 2)
-      );
-      
-      totalMovement += movement;
-    }
-    
-    const averageMovement = totalMovement / keyPoints.length;
-    return averageMovement < 0.03;
-  }, []);
+  // Configuration constants
+  const ANALYSIS_INTERVAL = 100; // Analyze every 100ms for responsiveness
+  const STABILITY_DURATION = 1000; // Require 1 second of stability (reduced for responsiveness)
+  const PROCESSING_COOLDOWN = 1500; // 1.5 second cooldown after processing
+  const CIRCLE_RADIUS = 80; // Radius of the detection circle in pixels
 
-  // Optimized finger analysis
-  const analyzeFingers = useCallback((landmarks: HandLandmark[]) => {
-    const fingerTips = [4, 8, 12, 16, 20];
-    const fingerBases = [2, 5, 9, 13, 17];
-    const fingerMids = [3, 6, 10, 14, 18];
-    
-    const fingerStates = {
-      thumb: { extended: false, angle: 0 },
-      index: { extended: false, angle: 0 },
-      middle: { extended: false, angle: 0 },
-      ring: { extended: false, angle: 0 },
-      pinky: { extended: false, angle: 0 }
-    };
-    
-    const fingerNames = ['thumb', 'index', 'middle', 'ring', 'pinky'] as const;
-    
-    fingerNames.forEach((finger, index) => {
-      const tip = landmarks[fingerTips[index]];
-      const base = landmarks[fingerBases[index]];
-      const mid = landmarks[fingerMids[index]];
-      const wrist = landmarks[0];
-      
-      const tipToWrist = Math.sqrt(
-        Math.pow(tip.x - wrist.x, 2) + 
-        Math.pow(tip.y - wrist.y, 2)
-      );
-      
-      const midToWrist = Math.sqrt(
-        Math.pow(mid.x - wrist.x, 2) + 
-        Math.pow(mid.y - wrist.y, 2)
-      );
-      
-      const extensionRatio = tipToWrist / midToWrist;
-      fingerStates[finger].extended = extensionRatio > 1.1;
-      fingerStates[finger].angle = Math.atan2(tip.y - base.y, tip.x - base.x);
-    });
-    
-    return fingerStates;
-  }, []);
+  // Hand connections for drawing
+  const HAND_CONNECTIONS = [
+    [0, 1], [1, 2], [2, 3], [3, 4], // thumb
+    [0, 5], [5, 6], [6, 7], [7, 8], // index finger
+    [0, 9], [9, 10], [10, 11], [11, 12], // middle finger
+    [0, 13], [13, 14], [14, 15], [15, 16], // ring finger
+    [0, 17], [17, 18], [18, 19], [19, 20], // pinky
+    [0, 5], [5, 9], [9, 13], [13, 17] // palm connections
+  ];
 
-  // Optimized gesture classification
-  const classifyGesture = useCallback((fingerStates: any): { letter: string; confidence: number } => {
-    const { thumb, index, middle, ring, pinky } = fingerStates;
-    
-    const patterns: Record<string, { pattern: boolean[]; confidence: number }> = {
-      'A': { pattern: [true, false, false, false, false], confidence: 0.9 },
-      'B': { pattern: [false, true, true, true, true], confidence: 0.9 },
-      'C': { pattern: [false, false, false, false, false], confidence: 0.7 },
-      'D': { pattern: [false, true, false, false, false], confidence: 0.9 },
-      'E': { pattern: [false, false, false, false, false], confidence: 0.8 },
-      'F': { pattern: [true, true, true, false, false], confidence: 0.9 },
-      'G': { pattern: [false, true, false, false, false], confidence: 0.9 },
-      'H': { pattern: [false, true, true, false, false], confidence: 0.9 },
-      'I': { pattern: [false, false, false, false, true], confidence: 0.9 },
-      'J': { pattern: [false, false, false, false, true], confidence: 0.9 },
-      'K': { pattern: [false, true, true, false, false], confidence: 0.9 },
-      'L': { pattern: [true, true, false, false, false], confidence: 0.9 },
-      'M': { pattern: [false, false, false, false, false], confidence: 0.8 },
-      'N': { pattern: [false, false, false, false, false], confidence: 0.8 },
-      'O': { pattern: [false, false, false, false, false], confidence: 0.7 },
-      'P': { pattern: [false, false, true, false, false], confidence: 0.9 },
-      'Q': { pattern: [false, true, false, false, false], confidence: 0.9 },
-      'R': { pattern: [false, true, true, false, false], confidence: 0.9 },
-      'S': { pattern: [false, false, false, false, false], confidence: 0.8 },
-      'T': { pattern: [false, false, false, false, false], confidence: 0.8 },
-      'U': { pattern: [false, true, true, false, false], confidence: 0.9 },
-      'V': { pattern: [false, true, true, false, false], confidence: 0.9 },
-      'W': { pattern: [false, true, true, true, false], confidence: 0.9 },
-      'X': { pattern: [false, true, false, false, false], confidence: 0.9 },
-      'Y': { pattern: [true, false, false, false, true], confidence: 0.9 },
-      'Z': { pattern: [false, true, false, false, false], confidence: 0.9 }
-    };
+  // ASL gesture patterns (finger states based)
+  const gesturePatterns: Record<string, FingerGuide> = {
+    'A': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Fist
+    'B': { thumb: false, index: true, middle: true, ring: true, pinky: true }, // All fingers extended
+    'C': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Curved hand
+    'D': { thumb: false, index: true, middle: false, ring: false, pinky: false }, // Index finger only
+    'E': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Fist
+    'F': { thumb: true, index: true, middle: true, ring: false, pinky: false }, // Three fingers
+    'G': { thumb: false, index: true, middle: false, ring: false, pinky: false }, // Index finger
+    'H': { thumb: false, index: true, middle: true, ring: false, pinky: false }, // Two fingers
+    'I': { thumb: false, index: false, middle: false, ring: false, pinky: true }, // Pinky only
+    'J': { thumb: false, index: false, middle: false, ring: false, pinky: true }, // Pinky with movement
+    'K': { thumb: false, index: true, middle: true, ring: false, pinky: false }, // Two fingers
+    'L': { thumb: true, index: true, middle: false, ring: false, pinky: false }, // L shape
+    'M': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Three fingers down
+    'N': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Two fingers down
+    'O': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Fist
+    'P': { thumb: false, index: true, middle: false, ring: false, pinky: false }, // Index finger
+    'Q': { thumb: false, index: true, middle: false, ring: false, pinky: false }, // Index finger
+    'R': { thumb: false, index: true, middle: true, ring: false, pinky: false }, // Two fingers crossed
+    'S': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Fist
+    'T': { thumb: false, index: false, middle: false, ring: false, pinky: false }, // Fist
+    'U': { thumb: false, index: true, middle: true, ring: false, pinky: false }, // Two fingers
+    'V': { thumb: false, index: true, middle: true, ring: false, pinky: false }, // Two fingers
+    'W': { thumb: false, index: true, middle: true, ring: true, pinky: false }, // Three fingers
+    'X': { thumb: false, index: true, middle: false, ring: false, pinky: false }, // Index finger bent
+    'Y': { thumb: true, index: false, middle: false, ring: false, pinky: true }, // Thumb and pinky
+    'Z': { thumb: false, index: true, middle: false, ring: false, pinky: false } // Index finger
+  };
 
-    let bestMatch = '';
-    let bestScore = 0;
+  // Initialize MediaPipe Hands
+  const initializeMediaPipe = useCallback(async () => {
+    if (!videoRef.current || !canvasRef.current) return;
 
-    for (const [letter, pattern] of Object.entries(patterns)) {
-      const expected = pattern.pattern;
-      const actual = [thumb.extended, index.extended, middle.extended, ring.extended, pinky.extended];
-      
-      let matches = 0;
-      for (let i = 0; i < 5; i++) {
-        if (expected[i] === actual[i]) matches++;
-      }
-      
-      const score = (matches / 5) * pattern.confidence;
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = letter;
-      }
-    }
-
-    return { letter: bestMatch, confidence: bestScore };
-  }, []);
-
-  // Optimized hand orientation detection
-  const determineHandOrientation = useCallback((landmarks: HandLandmark[]): string => {
-    const wrist = landmarks[0];
-    const middleFinger = landmarks[12];
-    
-    const dx = middleFinger.x - wrist.x;
-    const dy = middleFinger.y - wrist.y;
-    
-    return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
-  }, []);
-
-  // Optimized stability score calculation
-  const calculateStabilityScore = useCallback((currentLandmarks: HandLandmark[], previousLandmarks: HandLandmark[] | null): number => {
-    if (!previousLandmarks) return 0.8;
-    
-    let totalMovement = 0;
-    const keyPoints = [0, 4, 8, 12, 16, 20];
-    
-    for (const index of keyPoints) {
-      const current = currentLandmarks[index];
-      const previous = previousLandmarks[index];
-      
-      const movement = Math.sqrt(
-        Math.pow(current.x - previous.x, 2) + 
-        Math.pow(current.y - previous.y, 2)
-      );
-      
-      totalMovement += movement;
-    }
-    
-    const averageMovement = totalMovement / keyPoints.length;
-    return Math.max(0, 1 - (averageMovement * 5));
-  }, []);
-
-  // Optimized hand gesture analysis with throttling
-  const analyzeHandGesture = useCallback((landmarks: HandLandmark[], previousLandmarks: HandLandmark[] | null): GestureAnalysis => {
-    const now = performance.now();
-    if (now - lastAnalysisTimeRef.current < 100) { // Throttle to 10fps
-      return currentAnalysis || {
-        letter: '',
-        confidence: 0,
-        fingerStates: {
-          thumb: { extended: false, angle: 0 },
-          index: { extended: false, angle: 0 },
-          middle: { extended: false, angle: 0 },
-          ring: { extended: false, angle: 0 },
-          pinky: { extended: false, angle: 0 }
-        },
-        handOrientation: 'up',
-        stability: { isStable: false, score: 0 }
-      };
-    }
-    
-    lastAnalysisTimeRef.current = now;
-    
-    const fingerStates = analyzeFingers(landmarks);
-    const handOrientation = determineHandOrientation(landmarks);
-    const stabilityScore = calculateStabilityScore(landmarks, previousLandmarks);
-    const { letter, confidence } = classifyGesture(fingerStates);
-    const isStable = stabilityScore > 0.6;
-
-    return {
-      letter,
-      confidence,
-      fingerStates,
-      handOrientation,
-      stability: { isStable, score: stabilityScore }
-    };
-  }, [analyzeFingers, determineHandOrientation, calculateStabilityScore, classifyGesture, currentAnalysis]);
-
-  // Optimized LLM evaluation with debouncing
-  const evaluateWithLLM = useCallback(async (landmarks: HandLandmark[]) => {
-    if (isEvaluating) return;
-    
-    setIsEvaluating(true);
-    setLlmResult(null);
-    
     try {
-      const fingerStates = analyzeFingers(landmarks);
-      
-      const gestureData: HandGestureData = {
-        landmarks,
-        targetLetter,
-        fingerStates,
-        isStable: true,
-        stabilityScore: 0.9
-      };
-
-      const evaluation = await evaluateHandGesture(gestureData);
-      setLlmResult(evaluation);
-      
-      if (evaluation.isCorrect) {
-        setTimeout(() => {
-          onCorrectGesture();
-          setStableFrames(0);
-          setLlmResult(null);
-        }, 1000);
-      }
-    } catch (error) {
-      // Silent error handling
-    } finally {
-      setIsEvaluating(false);
-    }
-  }, [targetLetter, isEvaluating, analyzeFingers, onCorrectGesture]);
-
-  // Optimized landmark drawing with throttling
-  const drawLandmarks = useCallback((results: any) => {
-    if (!canvasRef.current || !videoRef.current) return;
-
-    const now = performance.now();
-    if (now - lastDrawTimeRef.current < 50) { // Throttle to 20fps
-      return;
-    }
-    lastDrawTimeRef.current = now;
-
-    const canvasCtx = canvasRef.current.getContext('2d');
-    if (!canvasCtx) return;
-
-    canvasCtx.save();
-    canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-    canvasCtx.drawImage(results.image, 0, 0, canvasRef.current.width, canvasRef.current.height);
-    
-    if (results.multiHandLandmarks) {
-      for (const landmarks of results.multiHandLandmarks) {
-        const isCorrect = currentAnalysis?.letter === targetLetter;
-        const strokeColor = isCorrect ? '#00FF00' : '#FF0000';
-        const fillColor = isCorrect ? '#00FF00' : '#FF0000';
-        
-        const connections = [
-          [0, 1], [1, 2], [2, 3], [3, 4], // thumb
-          [0, 5], [5, 6], [6, 7], [7, 8], // index
-          [0, 9], [9, 10], [10, 11], [11, 12], // middle
-          [0, 13], [13, 14], [14, 15], [15, 16], // ring
-          [0, 17], [17, 18], [18, 19], [19, 20], // pinky
-          [0, 5], [5, 9], [9, 13], [13, 17] // palm
-        ];
-        
-        canvasCtx.strokeStyle = strokeColor;
-        canvasCtx.lineWidth = 2;
-        canvasCtx.fillStyle = fillColor;
-        
-        connections.forEach(([start, end]) => {
-          const startPoint = landmarks[start];
-          const endPoint = landmarks[end];
-          
-          canvasCtx.beginPath();
-          canvasCtx.moveTo(startPoint.x * canvasRef.current!.width, startPoint.y * canvasRef.current!.height);
-          canvasCtx.lineTo(endPoint.x * canvasRef.current!.width, endPoint.y * canvasRef.current!.height);
-          canvasCtx.stroke();
-        });
-
-        // Draw landmarks with finger feedback
-        const fingerTips = [4, 8, 12, 16, 20];
-        const fingerNames = ['T', 'I', 'M', 'R', 'P'];
-        
-        landmarks.forEach((landmark: any, index: number) => {
-          const isFingerTip = fingerTips.includes(index);
-          let landmarkColor = fillColor;
-          let landmarkSize = 3;
-          
-          if (isFingerTip && currentAnalysis?.fingerStates) {
-            const fingerIndex = fingerTips.indexOf(index);
-            const fingerKey = ['thumb', 'index', 'middle', 'ring', 'pinky'][fingerIndex] as keyof typeof currentAnalysis.fingerStates;
-            const isExtended = currentAnalysis.fingerStates[fingerKey].extended;
-            landmarkColor = isExtended ? '#00FF00' : '#FF0000';
-            landmarkSize = 6;
-            
-            const x = landmark.x * canvasRef.current!.width;
-            const y = landmark.y * canvasRef.current!.height;
-            
-            canvasCtx.fillStyle = isExtended ? 'rgba(0, 255, 0, 0.3)' : 'rgba(255, 0, 0, 0.3)';
-            canvasCtx.beginPath();
-            canvasCtx.arc(x, y, 15, 0, 2 * Math.PI);
-            canvasCtx.fill();
-            
-            canvasCtx.strokeStyle = isExtended ? '#00FF00' : '#FF0000';
-            canvasCtx.lineWidth = 2;
-            canvasCtx.beginPath();
-            canvasCtx.arc(x, y, 15, 0, 2 * Math.PI);
-            canvasCtx.stroke();
-            
-            canvasCtx.fillStyle = '#FFFFFF';
-            canvasCtx.font = 'bold 12px Arial';
-            canvasCtx.textAlign = 'center';
-            canvasCtx.textBaseline = 'middle';
-            canvasCtx.fillText(fingerNames[fingerIndex], x, y - 20);
-            
-            canvasCtx.fillStyle = isExtended ? '#00FF00' : '#FF0000';
-            canvasCtx.font = 'bold 10px Arial';
-            canvasCtx.fillText(isExtended ? 'OPEN' : 'CLOSED', x, y + 20);
-          }
-          
-          canvasCtx.fillStyle = landmarkColor;
-          canvasCtx.beginPath();
-          canvasCtx.arc(
-            landmark.x * canvasRef.current!.width,
-            landmark.y * canvasRef.current!.height,
-            landmarkSize,
-            0,
-            2 * Math.PI
-          );
-          canvasCtx.fill();
-        });
-        
-        // Draw finger connection lines with status colors
-        if (currentAnalysis?.fingerStates) {
-          const fingerConnections = [
-            { start: 0, end: 4, finger: 'thumb' },
-            { start: 0, end: 8, finger: 'index' },
-            { start: 0, end: 12, finger: 'middle' },
-            { start: 0, end: 16, finger: 'ring' },
-            { start: 0, end: 20, finger: 'pinky' }
-          ];
-          
-          fingerConnections.forEach(({ start, end, finger }) => {
-            const isExtended = currentAnalysis.fingerStates[finger as keyof typeof currentAnalysis.fingerStates].extended;
-            const connectionColor = isExtended ? '#00FF00' : '#FF0000';
-            
-            const startPoint = landmarks[start];
-            const endPoint = landmarks[end];
-            
-            canvasCtx.strokeStyle = connectionColor;
-            canvasCtx.lineWidth = 3;
-            canvasCtx.setLineDash([5, 5]);
-            
-            canvasCtx.beginPath();
-            canvasCtx.moveTo(startPoint.x * canvasRef.current!.width, startPoint.y * canvasRef.current!.height);
-            canvasCtx.lineTo(endPoint.x * canvasRef.current!.width, endPoint.y * canvasRef.current!.height);
-            canvasCtx.stroke();
-            
-            canvasCtx.setLineDash([]);
-          });
-        }
-      }
-    }
-    canvasCtx.restore();
-  }, [currentAnalysis, targetLetter]);
-
-  // Optimized MediaPipe initialization with error suppression
-  const initializeHands = useCallback(async () => {
-    try {
+      // Dynamically import MediaPipe
       const { Hands } = await import('@mediapipe/hands');
-      const { Camera } = await import('@mediapipe/camera_utils');
-
-      // Suppress WebGL warnings and errors
-      originalConsoleWarnRef.current = console.warn;
-      originalConsoleErrorRef.current = console.error;
       
-      console.warn = (...args) => {
-        const message = args[0];
-        if (typeof message === 'string' && (
-          message.includes('WebGL') || 
-          message.includes('OpenGL') || 
-          message.includes('gl_context') ||
-          message.includes('hands soluti') ||
-          message.includes('simd wasm bin.js') ||
-          message.includes('WebGL context') ||
-          message.includes('disabled') ||
-          message.includes('destroyed') ||
-          message.includes('created')
-        )) {
-          return; // Suppress WebGL-related warnings
-        }
-        originalConsoleWarnRef.current?.apply(console, args);
-      };
-      
-      console.error = (...args) => {
-        const message = args[0];
-        if (typeof message === 'string' && (
-          message.includes('WebGL') || 
-          message.includes('OpenGL') || 
-          message.includes('gl_context') ||
-          message.includes('hands soluti') ||
-          message.includes('simd wasm bin.js') ||
-          message.includes('WebGL context') ||
-          message.includes('disabled') ||
-          message.includes('destroyed') ||
-          message.includes('created')
-        )) {
-          return; // Suppress WebGL-related errors
-        }
-        originalConsoleErrorRef.current?.apply(console, args);
-      };
-
       const hands = new Hands({
         locateFile: (file) => {
           return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
         }
       });
 
-      hands.setOptions({
-        maxNumHands: 1,
-        modelComplexity: 0,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.3
+      // Wait for MediaPipe to be ready
+      await new Promise((resolve) => {
+        const checkReady = () => {
+          if (hands && typeof hands.initialize === 'function') {
+            resolve(true);
+          } else {
+            setTimeout(checkReady, 100);
+          }
+        };
+        checkReady();
       });
 
-      const FRAME_SKIP = 6; // Process every 6th frame to reduce load
+      // Set options with proper error handling
+      try {
+        hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 0, // Use simpler model to avoid runtime issues
+          minDetectionConfidence: 0.7,
+          minTrackingConfidence: 0.5
+        });
+      } catch (optionsError) {
+        console.warn('Failed to set MediaPipe options, using defaults:', optionsError);
+        // Continue with default options
+      }
 
-      let lastProcessTime = 0;
-      const PROCESS_INTERVAL = 100; // Process every 100ms max
+      hands.onResults((results) => {
+        if (!canvasRef.current) return;
 
-      hands.onResults((results: any) => {
-        const now = performance.now();
-        if (now - lastProcessTime < PROCESS_INTERVAL) {
-          return; // Skip if processing too frequently
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        // Clear canvas
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Draw video frame
+        if (videoRef.current) {
+          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
         }
-        lastProcessTime = now;
 
-        frameCountRef.current++;
-        if (frameCountRef.current % FRAME_SKIP !== 0) return;
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+
+        // Draw detection circle
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([10, 5]);
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, CIRCLE_RADIUS, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.setLineDash([]);
 
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
           const landmarks = results.multiHandLandmarks[0];
-          const analysis = analyzeHandGesture(landmarks, previousLandmarksRef.current);
-          const stable = isHandStable(landmarks, previousLandmarksRef.current);
           
-          setCurrentAnalysis(analysis);
+          // Check if hand is in circle
+          const wristX = landmarks[0].x * canvas.width;
+          const wristY = landmarks[0].y * canvas.height;
+          const distanceFromCenter = Math.sqrt(
+            Math.pow(wristX - centerX, 2) + Math.pow(wristY - centerY, 2)
+          );
           
-          if (stable) {
-            setStableFrames(prev => prev + 1);
+          const isInCircle = distanceFromCenter <= CIRCLE_RADIUS;
+          
+          // Update circle color based on hand position
+          ctx.strokeStyle = isInCircle ? 'rgba(0, 255, 0, 0.8)' : 'rgba(255, 255, 255, 0.6)';
+          ctx.lineWidth = 3;
+          ctx.setLineDash(isInCircle ? [] : [10, 5]);
+          ctx.beginPath();
+          ctx.arc(centerX, centerY, CIRCLE_RADIUS, 0, 2 * Math.PI);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          if (isInCircle) {
+            // Detect finger states first
+            const fingerStates = detectFingerStates(landmarks);
+            const fingerCount = Object.values(fingerStates).filter(Boolean).length;
             
-            if (stableFrames >= 1 && !isEvaluating) {
-              evaluateWithLLM(landmarks);
-            }
+            // Draw hand landmarks and connections with finger state colors
+            drawHandLandmarks(ctx, landmarks, canvas.width, canvas.height, fingerStates);
+            
+            // Update hand state
+            const currentHandState: HandState = {
+              isInCircle: true,
+              fingerCount,
+              confidence: 0.8,
+              isStable: false,
+              landmarks,
+              fingerStates
+            };
+
+            setHandState(currentHandState);
+            lastHandStateRef.current = currentHandState;
           } else {
-            setStableFrames(0);
+            setHandState({
+              isInCircle: false,
+              fingerCount: 0,
+              confidence: 0,
+              isStable: false
+            });
           }
-          
-          previousLandmarksRef.current = landmarks;
-          drawLandmarks(results);
         } else {
-          setCurrentAnalysis(null);
-          setStableFrames(0);
-          previousLandmarksRef.current = null;
+          setHandState({
+            isInCircle: false,
+            fingerCount: 0,
+            confidence: 0,
+            isStable: false
+          });
         }
       });
 
-      return { hands, Camera };
-    } catch (error) {
-      // Silent error handling
-      throw error;
-    }
-  }, [analyzeHandGesture, isHandStable, stableFrames, isEvaluating, evaluateWithLLM, drawLandmarks]);
+      handsRef.current = hands;
 
-  // Optimized camera initialization with cleanup
+      // Start processing frames
+      const processFrame = async () => {
+        if (handsRef.current && videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+          try {
+            await handsRef.current.send({ image: videoRef.current });
+          } catch (sendError) {
+            console.warn('MediaPipe send error:', sendError);
+            // Continue processing even if send fails
+          }
+        }
+        animationFrameRef.current = requestAnimationFrame(processFrame);
+      };
+
+      animationFrameRef.current = requestAnimationFrame(processFrame);
+
+    } catch (error) {
+      console.error('MediaPipe initialization failed:', error);
+      setError('Advanced hand tracking unavailable. Using basic detection.');
+      
+      // Fallback to basic hand detection
+      const processFrame = async () => {
+        if (videoRef.current && canvasRef.current) {
+          const canvas = canvasRef.current;
+          const ctx = canvas.getContext('2d');
+          if (ctx && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+            // Basic hand detection fallback
+            ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+            
+            // Simple circle detection
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([10, 5]);
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, CIRCLE_RADIUS, 0, 2 * Math.PI);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            setHandState({
+              isInCircle: false,
+              fingerCount: 0,
+              confidence: 0,
+              isStable: false
+            });
+          }
+        }
+        animationFrameRef.current = requestAnimationFrame(processFrame);
+      };
+      
+      animationFrameRef.current = requestAnimationFrame(processFrame);
+    }
+  }, []);
+
+  // Draw hand landmarks and connections
+  const drawHandLandmarks = useCallback((ctx: CanvasRenderingContext2D, landmarks: any[], width: number, height: number, fingerStates?: FingerGuide) => {
+    // Draw connections with color based on finger states
+    ctx.lineWidth = 2;
+    
+    HAND_CONNECTIONS.forEach(([start, end]) => {
+      const startPoint = landmarks[start];
+      const endPoint = landmarks[end];
+      
+      if (startPoint && endPoint) {
+        // Determine line color based on finger states
+        let lineColor = '#00FF00'; // Default green
+        
+        // Check if this connection is part of a finger and set color accordingly
+        // Thumb connections (landmarks 1-4)
+        if ((start >= 1 && start <= 4) || (end >= 1 && end <= 4)) {
+          lineColor = fingerStates?.thumb ? '#00FF00' : '#FF0000';
+        }
+        // Index finger connections (landmarks 5-8)
+        else if ((start >= 5 && start <= 8) || (end >= 5 && end <= 8)) {
+          lineColor = fingerStates?.index ? '#00FF00' : '#FF0000';
+        }
+        // Middle finger connections (landmarks 9-12)
+        else if ((start >= 9 && start <= 12) || (end >= 9 && end <= 12)) {
+          lineColor = fingerStates?.middle ? '#00FF00' : '#FF0000';
+        }
+        // Ring finger connections (landmarks 13-16)
+        else if ((start >= 13 && start <= 16) || (end >= 13 && end <= 16)) {
+          lineColor = fingerStates?.ring ? '#00FF00' : '#FF0000';
+        }
+        // Pinky finger connections (landmarks 17-20)
+        else if ((start >= 17 && start <= 20) || (end >= 17 && end <= 20)) {
+          lineColor = fingerStates?.pinky ? '#00FF00' : '#FF0000';
+        }
+        // Wrist connections (landmark 0) - color based on overall hand state
+        else if (start === 0 || end === 0) {
+          const anyFingerOpen = fingerStates && Object.values(fingerStates).some(Boolean);
+          lineColor = anyFingerOpen ? '#00FF00' : '#FF0000';
+        }
+        
+        ctx.strokeStyle = lineColor;
+        ctx.beginPath();
+        ctx.moveTo(startPoint.x * width, startPoint.y * height);
+        ctx.lineTo(endPoint.x * width, endPoint.y * height);
+        ctx.stroke();
+      }
+    });
+
+    // Draw landmarks
+    landmarks.forEach((landmark, index) => {
+      const x = landmark.x * width;
+      const y = landmark.y * height;
+      
+      // All dots are either red or green based on finger state
+      let color = '#FF0000'; // Default red
+      let radius = 4;
+      let label = '';
+      
+      // Determine which finger this landmark belongs to and set color accordingly
+      if (index === 0) { // Wrist
+        // Wrist color based on overall hand state (if any finger is open, wrist is green)
+        const anyFingerOpen = fingerStates && Object.values(fingerStates).some(Boolean);
+        color = anyFingerOpen ? '#00FF00' : '#FF0000';
+        radius = 6;
+      }
+      else if ([1, 2, 3, 4].includes(index)) { // Thumb landmarks
+        color = fingerStates?.thumb ? '#00FF00' : '#FF0000';
+        radius = 5;
+        if (index === 4) { // Thumb tip
+          label = fingerStates?.thumb ? 'O' : 'C';
+          radius = 6;
+        }
+      }
+      else if ([5, 6, 7, 8].includes(index)) { // Index finger landmarks
+        color = fingerStates?.index ? '#00FF00' : '#FF0000';
+        radius = 5;
+        if (index === 8) { // Index tip
+          label = fingerStates?.index ? 'O' : 'C';
+          radius = 6;
+        }
+      }
+      else if ([9, 10, 11, 12].includes(index)) { // Middle finger landmarks
+        color = fingerStates?.middle ? '#00FF00' : '#FF0000';
+        radius = 5;
+        if (index === 12) { // Middle tip
+          label = fingerStates?.middle ? 'O' : 'C';
+          radius = 6;
+        }
+      }
+      else if ([13, 14, 15, 16].includes(index)) { // Ring finger landmarks
+        color = fingerStates?.ring ? '#00FF00' : '#FF0000';
+        radius = 5;
+        if (index === 16) { // Ring tip
+          label = fingerStates?.ring ? 'O' : 'C';
+          radius = 6;
+        }
+      }
+      else if ([17, 18, 19, 20].includes(index)) { // Pinky finger landmarks
+        color = fingerStates?.pinky ? '#00FF00' : '#FF0000';
+        radius = 5;
+        if (index === 20) { // Pinky tip
+          label = fingerStates?.pinky ? 'O' : 'C';
+          radius = 6;
+        }
+      }
+      
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+      ctx.fill();
+      
+      // Add label (only C/O for finger tips, no numbers for other joints)
+      if (label) {
+        ctx.fillStyle = 'white';
+        ctx.font = '12px Arial';
+        ctx.fillText(label, x - 3, y + 4);
+      }
+    });
+  }, []);
+
+  // Detect individual finger states with improved accuracy
+  const detectFingerStates = useCallback((landmarks: any[]): FingerGuide => {
+    const fingerStates: FingerGuide = {
+      thumb: false,
+      index: false,
+      middle: false,
+      ring: false,
+      pinky: false
+    };
+
+    // Thumb detection - check if thumb tip is above the MCP joint
+    const thumbTip = landmarks[4];
+    const thumbMCP = landmarks[2];
+    const thumbIP = landmarks[3];
+    // Thumb is open if tip is above MCP joint and extended
+    fingerStates.thumb = thumbTip.y < thumbMCP.y && thumbTip.y < thumbIP.y;
+
+    // Index finger detection - check if tip is above PIP joint
+    const indexTip = landmarks[8];
+    const indexPIP = landmarks[6];
+    const indexMCP = landmarks[5];
+    // Index is open if tip is above PIP joint
+    fingerStates.index = indexTip.y < indexPIP.y;
+
+    // Middle finger detection - check if tip is above PIP joint
+    const middleTip = landmarks[12];
+    const middlePIP = landmarks[10];
+    const middleMCP = landmarks[9];
+    // Middle is open if tip is above PIP joint
+    fingerStates.middle = middleTip.y < middlePIP.y;
+
+    // Ring finger detection - check if tip is above PIP joint
+    const ringTip = landmarks[16];
+    const ringPIP = landmarks[14];
+    const ringMCP = landmarks[13];
+    // Ring is open if tip is above PIP joint
+    fingerStates.ring = ringTip.y < ringPIP.y;
+
+    // Pinky detection - check if tip is above PIP joint
+    const pinkyTip = landmarks[20];
+    const pinkyPIP = landmarks[18];
+    const pinkyMCP = landmarks[17];
+    // Pinky is open if tip is above PIP joint
+    fingerStates.pinky = pinkyTip.y < pinkyPIP.y;
+
+    return fingerStates;
+  }, []);
+
+  // Check if current hand state is stable compared to previous
+  const isHandStateStable = useCallback((current: HandState, previous: HandState | null): boolean => {
+    if (!previous || !current.fingerStates || !previous.fingerStates) return false;
+    
+    // Check if all finger states are exactly the same
+    const fingerStatesMatch = (
+      current.fingerStates.thumb === previous.fingerStates.thumb &&
+      current.fingerStates.index === previous.fingerStates.index &&
+      current.fingerStates.middle === previous.fingerStates.middle &&
+      current.fingerStates.ring === previous.fingerStates.ring &&
+      current.fingerStates.pinky === previous.fingerStates.pinky
+    );
+    
+    return (
+      current.isInCircle === previous.isInCircle &&
+      fingerStatesMatch &&
+      Math.abs(current.confidence - previous.confidence) < 0.2
+    );
+  }, []);
+
+  // Check if the detected gesture matches the target letter
+  const isCorrectGesture = useCallback((fingerStates: FingerGuide | undefined): boolean => {
+    if (!fingerStates) return false;
+    
+    const targetFingerGuide = gesturePatterns[targetLetter];
+    if (!targetFingerGuide) return false;
+
+    // Compare each finger state
+    return (
+      fingerStates.thumb === targetFingerGuide.thumb &&
+      fingerStates.index === targetFingerGuide.index &&
+      fingerStates.middle === targetFingerGuide.middle &&
+      fingerStates.ring === targetFingerGuide.ring &&
+      fingerStates.pinky === targetFingerGuide.pinky
+    );
+  }, [targetLetter]);
+
+  // Stability and processing logic
+  useEffect(() => {
+    if (!handState.isInCircle || isProcessing) return;
+
+    const now = Date.now();
+    const isStable = isHandStateStable(handState, lastHandStateRef.current);
+    
+    if (isStable) {
+      if (stableStartTimeRef.current === null) {
+        stableStartTimeRef.current = now;
+      }
+      
+      const stableDuration = now - stableStartTimeRef.current;
+      setStableTime(stableDuration);
+      
+      // Check if stable long enough and gesture is correct
+      if (stableDuration >= STABILITY_DURATION && isCorrectGesture(handState.fingerStates)) {
+        console.log('✅ Correct gesture detected! Advancing to next letter...');
+        setIsProcessing(true);
+        onCorrectGesture();
+        
+        stableStartTimeRef.current = null;
+        setStableTime(0);
+        
+        if (processingTimeoutRef.current) {
+          clearTimeout(processingTimeoutRef.current);
+        }
+        processingTimeoutRef.current = setTimeout(() => {
+          setIsProcessing(false);
+        }, PROCESSING_COOLDOWN);
+      }
+    } else {
+      stableStartTimeRef.current = null;
+      setStableTime(0);
+    }
+  }, [handState.isInCircle, handState.fingerStates, isProcessing]);
+
+  // Initialize camera and MediaPipe
   useEffect(() => {
     if (!isActive) {
       setIsCameraActive(false);
       return;
     }
 
-    let isInitializing = true;
-    let cleanupTimeout: NodeJS.Timeout | undefined;
+    if (isInitializingRef.current) return;
+    isInitializingRef.current = true;
+    setIsInitializing(true);
 
     const initializeCamera = async () => {
       setError(null);
@@ -613,13 +565,13 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
           streamRef.current = null;
         }
         
-        // Get camera stream with optimized settings
+        // Get camera stream
         const stream = await navigator.mediaDevices.getUserMedia({ 
           video: { 
-            width: { ideal: 480 }, 
-            height: { ideal: 360 },
+            width: { ideal: 640 }, 
+            height: { ideal: 480 },
             facingMode: 'user',
-            frameRate: { ideal: 15 } // Lower frame rate for better performance
+            frameRate: { ideal: 30 }
           } 
         });
         
@@ -644,69 +596,42 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
           });
         }
         
-        // Initialize MediaPipe
-        const { hands: handsInstance, Camera: CameraClass } = await initializeHands();
-        handsRef.current = handsInstance;
-        
-        cameraRef.current = new CameraClass(videoRef.current!, {
-          onFrame: async () => {
-            if (!isInitializing && videoRef.current && videoRef.current.readyState === 4) {
-              try {
-                await handsRef.current.send({ image: videoRef.current });
-              } catch (error) {
-                // Silent error handling
-              }
-            }
-          },
-          width: 480,
-          height: 360
-        });
-
-        await cameraRef.current.start();
-        isInitializing = false;
         setIsCameraActive(true);
+        
+        // Initialize MediaPipe after camera is ready
+        await initializeMediaPipe();
+        
       } catch (error) {
+        console.warn('Camera initialization failed:', error);
         setError('Failed to initialize camera. Please check permissions and try again.');
         setIsCameraActive(false);
+      } finally {
+        isInitializingRef.current = false;
+        setIsInitializing(false);
       }
     };
 
     initializeCamera();
 
     return () => {
-      isInitializing = true;
-      
-      // Clear any pending timeouts
-      if (cleanupTimeout) {
-        clearTimeout(cleanupTimeout);
-      }
-      
-      if (cameraRef.current) {
-        try { cameraRef.current.stop(); } catch (error) {}
-      }
-      if (handsRef.current) {
-        try { handsRef.current.close(); } catch (error) {}
+      isInitializingRef.current = true;
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
       }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
-      
-      // Restore original console methods
-      if (originalConsoleWarnRef.current) {
-        console.warn = originalConsoleWarnRef.current;
+      if (processingTimeoutRef.current) {
+        clearTimeout(processingTimeoutRef.current);
       }
-      if (originalConsoleErrorRef.current) {
-        console.error = originalConsoleErrorRef.current;
-      }
-      
       setIsCameraActive(false);
     };
-  }, [isActive, initializeHands]);
+  }, [isActive, initializeMediaPipe]);
 
   if (!isActive) {
     return (
       <div className="bg-white rounded-lg shadow-lg p-6">
-        <h3 className="text-xl font-semibold mb-4 text-gray-800">Camera</h3>
+        <h3 className="text-xl font-semibold mb-4 text-gray-800">Hand Gesture Recognition</h3>
         <div className="bg-gray-100 rounded-lg p-8 text-center">
           <p className="text-gray-600">Camera is inactive</p>
         </div>
@@ -714,12 +639,24 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
     );
   }
 
+  const targetFingerGuide = gesturePatterns[targetLetter];
+
+  const toggleFullScreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen();
+      setIsFullScreen(true);
+    } else {
+      document.exitFullscreen();
+      setIsFullScreen(false);
+    }
+  };
+
   return (
-    <div className="bg-white rounded-lg shadow-lg p-6">
-      <h3 className="text-xl font-semibold mb-4 text-gray-800">Hand Gesture Recognition</h3>
+    <div className={`${isFullScreen ? 'fixed inset-0 z-50 bg-black' : 'bg-white rounded-lg shadow-lg p-6'}`}>
+      {!isFullScreen && <h3 className="text-xl font-semibold mb-4 text-gray-800">Hand Gesture Recognition</h3>}
       
       {error && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg z-10 relative">
           <p className="text-sm text-red-700 mb-2">{error}</p>
           <button 
             onClick={() => {
@@ -739,10 +676,10 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
         </div>
       )}
       
-      <div className="relative" style={{ aspectRatio: '4/3' }}>
+      <div className={`relative ${isFullScreen ? 'w-full h-full flex items-center justify-center' : ''}`} style={!isFullScreen ? { aspectRatio: '4/3' } : {}}>
         <video
           ref={videoRef}
-          className="w-full h-full object-contain rounded-lg border-2 border-gray-300"
+          className={`${isFullScreen ? 'h-full w-auto object-contain' : 'w-full h-full object-contain'} rounded-lg border-2 border-gray-300`}
           autoPlay
           playsInline
           muted
@@ -753,168 +690,226 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
         />
         <canvas
           ref={canvasRef}
-          className="absolute top-0 left-0 w-full h-full rounded-lg"
-          width={480}
-          height={360}
+          className={`absolute ${isFullScreen ? 'h-full w-auto' : 'w-full h-full'} rounded-lg`}
+          width={640}
+          height={480}
+          style={{
+            top: isFullScreen ? '50%' : '0',
+            left: isFullScreen ? '50%' : '0',
+            transform: isFullScreen ? 'translate(-50%, -50%)' : 'none'
+          }}
         />
         
-        {/* Target Letter */}
-        <div className="absolute top-4 left-4 bg-black bg-opacity-70 rounded-lg p-3 text-white">
+        {/* Target Letter - Moved to bottom right */}
+        <div className="absolute bottom-4 right-4 bg-black bg-opacity-70 rounded-lg p-3 text-white">
           <div className="text-center">
             <p className="text-xs font-semibold mb-1">Target</p>
             <p className="text-2xl font-bold text-blue-400">{targetLetter}</p>
           </div>
         </div>
+
+
         
-        {/* Detection Status */}
-        <div className="absolute top-4 right-4 bg-black bg-opacity-70 rounded-lg p-3 text-white">
+        {/* Hand Status - Very compact top right */}
+        <div className="absolute top-2 right-2 bg-black bg-opacity-70 rounded-lg p-1 text-white">
           <div className="text-center">
-            <p className="text-xs font-semibold mb-1">Detected</p>
-            <p className={`text-xl font-bold ${
-              currentAnalysis?.letter ? 
-                (currentAnalysis.letter === targetLetter ? 'text-green-400' : 'text-red-400') : 
-                'text-gray-300'
+            <p className="text-xs font-semibold">Status</p>
+            <p className={`text-xs font-bold ${
+              handState.isInCircle ? 'text-green-400' : 'text-red-400'
             }`}>
-              {currentAnalysis?.letter || 'None'}
+              {handState.isInCircle ? 'In Circle' : 'Not Detected'}
             </p>
-            {currentAnalysis && (
+            {handState.isInCircle && (
               <p className="text-xs text-gray-300">
-                {Math.round(currentAnalysis.confidence * 100)}% confidence
+                {handState.fingerCount} fingers
               </p>
             )}
           </div>
         </div>
+
+        {/* Full Screen Button - Middle Right */}
+        <div className="absolute right-4 top-1/2 transform -translate-y-1/2">
+          <div className="flex flex-col items-center space-y-2">
+            <button
+              onClick={toggleFullScreen}
+              className="text-white hover:text-gray-300 transition-colors bg-black bg-opacity-70 rounded-lg p-2 cursor-pointer"
+              title={isFullScreen ? "Exit Full Screen" : "Enter Full Screen"}
+            >
+              {isFullScreen ? (
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/>
+                </svg>
+              ) : (
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                </svg>
+              )}
+            </button>
+            <div className="bg-black bg-opacity-70 rounded-lg px-2 py-1 text-white text-xs font-semibold">
+              {isFullScreen ? "Exit Full" : "Full Screen"}
+            </div>
+          </div>
+        </div>
+
+        {/* Simple Hand Tracking Legend - Only Green/Red */}
+        <div className="absolute bottom-4 left-4 bg-black bg-opacity-70 rounded-lg p-2 text-white">
+          <div className="text-xs">
+            <p className="font-semibold mb-1">Finger States:</p>
+            <div className="space-y-1">
+              <div className="flex items-center space-x-2">
+                <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                <span>Green + "O" = Open</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+                <span>Red + "C" = Closed</span>
+              </div>
+            </div>
+          </div>
+        </div>
         
         {/* Hand Guide */}
-        {!currentAnalysis && (
+        {!handState.isInCircle && (
           <div className="absolute inset-0 pointer-events-none">
             <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-              <div className="w-32 h-32 border-2 border-dashed border-white rounded-full opacity-60 flex items-center justify-center bg-black bg-opacity-20">
+              <div className="w-40 h-40 border-2 border-dashed border-white rounded-full opacity-60 flex items-center justify-center bg-black bg-opacity-20">
                 <span className="text-white text-sm font-bold text-center leading-tight">
-                  Place hand<br />here
+                  Place hand<br />in circle
                 </span>
               </div>
             </div>
           </div>
         )}
         
-        {/* Stability Indicator */}
-        <div className="absolute bottom-4 left-4 right-4">
-          <div className="bg-black bg-opacity-70 rounded-lg p-3 text-white">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-semibold">Stability</span>
-              <span className="text-sm">{stableFrames}/2</span>
+        {/* Loading Message */}
+        {isInitializing && (
+          <div className="absolute inset-0 pointer-events-none">
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+              <div className="bg-black bg-opacity-70 rounded-lg p-4 text-white text-center max-w-sm">
+                <p className="text-sm font-semibold mb-2">🔄 Initializing...</p>
+                <p className="text-xs text-gray-300">
+                  Setting up hand tracking...
+                </p>
+              </div>
             </div>
-            <div className="w-full bg-gray-600 rounded-full h-2">
+          </div>
+        )}
+        
+        {/* Processing Overlay */}
+        {isProcessing && (
+          <div className="absolute inset-0 pointer-events-none">
+            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+              <div className="bg-green-600 bg-opacity-90 rounded-lg p-4 text-white text-center max-w-sm">
+                <p className="text-sm font-semibold mb-2">✅ Correct!</p>
+                <p className="text-xs text-gray-100">
+                  Moving to next letter...
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* Finger Guide - Moved to top-left, smaller to avoid blocking circle */}
+        <div className="absolute top-2 left-2 w-40">
+          <div className="bg-black bg-opacity-70 rounded-lg p-1 text-white">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold">Guide: {targetLetter}</span>
+              <span className="text-xs">
+                {handState.isInCircle && handState.isStable 
+                  ? `${Math.round(stableTime / 1000)}s / ${STABILITY_DURATION / 1000}s`
+                  : '0s / 1s'
+                }
+              </span>
+            </div>
+            
+            {/* Compact Finger Status Grid */}
+            <div className="grid grid-cols-5 gap-1 mb-1">
+              {Object.entries(targetFingerGuide).map(([finger, shouldBeOpen]) => (
+                <div key={finger} className="text-center">
+                  <div className={`text-xs font-medium ${
+                    shouldBeOpen ? 'text-green-400' : 'text-red-400'
+                  }`}>
+                    {finger.charAt(0).toUpperCase()}
+                  </div>
+                  <div className={`w-4 h-4 rounded-full mx-auto flex items-center justify-center text-xs ${
+                    shouldBeOpen ? 'bg-green-500' : 'bg-red-500'
+                  }`}>
+                    {shouldBeOpen ? 'O' : 'C'}
+                  </div>
+                  {handState.fingerStates && (
+                    <div className={`text-xs ${
+                      handState.fingerStates[finger as keyof FingerGuide] === shouldBeOpen 
+                        ? 'text-green-400' 
+                        : 'text-red-400'
+                    }`}>
+                      {handState.fingerStates[finger as keyof FingerGuide] ? 'O' : 'C'}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            
+            {/* Compact Stability Progress */}
+            <div className="w-full bg-gray-600 rounded-full h-1 mb-1">
               <div 
-                className={`h-2 rounded-full transition-all duration-300 ${
-                  currentAnalysis?.stability.isStable ? 'bg-green-400' : 'bg-blue-400'
+                className={`h-1 rounded-full transition-all duration-300 ${
+                  isCorrectGesture(handState.fingerStates) ? 'bg-green-400' : 'bg-blue-400'
                 }`}
-                style={{ width: `${Math.min((stableFrames / 2) * 100, 100)}%` }}
+                style={{ 
+                  width: `${Math.min((stableTime / STABILITY_DURATION) * 100, 100)}%` 
+                }}
               ></div>
             </div>
             
-            <div className="mt-2 text-xs">
-              {currentAnalysis ? (
-                <div className="space-y-1">
+            <div className="text-xs">
+              {handState.isInCircle ? (
+                <div className="space-y-0.5">
                   <p className={`font-medium ${
-                    currentAnalysis.letter === targetLetter ? 'text-green-400' : 'text-red-400'
+                    isCorrectGesture(handState.fingerStates) ? 'text-green-400' : 'text-yellow-400'
                   }`}>
-                    {currentAnalysis.letter === targetLetter ? '✅ Correct!' : '❌ Try again'}
+                    {isCorrectGesture(handState.fingerStates) 
+                      ? `✅ Correct!` 
+                      : `❌ Adjust`
+                    }
                   </p>
                   <p className="text-gray-300">
-                    Stability: {Math.round(currentAnalysis.stability.score * 100)}%
+                    {handState.isStable ? 'Keep steady!' : 'Hold position'}
                   </p>
-                  {llmResult && (
-                    <p className={`font-medium ${
-                      llmResult.isCorrect ? 'text-green-400' : 'text-orange-400'
-                    }`}>
-                      AI: {llmResult.isCorrect ? '✅ Confirmed' : '⚠️ Needs adjustment'}
+                  {/* Compact Debug info */}
+                  <p className="text-gray-400 text-xs">
+                    Stable: {handState.isStable ? 'Yes' : 'No'} | 
+                    {Math.round(stableTime / 100)}/10
+                  </p>
+                  {handState.fingerStates && (
+                    <p className="text-gray-400 text-xs">
+                      T:{handState.fingerStates.thumb ? 'O' : 'C'} 
+                      I:{handState.fingerStates.index ? 'O' : 'C'} 
+                      M:{handState.fingerStates.middle ? 'O' : 'C'} 
+                      R:{handState.fingerStates.ring ? 'O' : 'C'} 
+                      P:{handState.fingerStates.pinky ? 'O' : 'C'}
                     </p>
                   )}
                 </div>
               ) : (
-                <p className="text-gray-300">Position your hand in the center</p>
+                <p className="text-gray-300">Place hand in circle</p>
               )}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Analysis Panel */}
-      {currentAnalysis && (
-        <div className="mt-4 space-y-3">
-          {/* Finger Analysis */}
-          <div className="bg-gray-50 rounded-lg p-3">
-            <h4 className="font-semibold text-gray-800 mb-2">Finger Analysis</h4>
-            <div className="grid grid-cols-5 gap-2 text-xs">
-              {Object.entries(currentAnalysis.fingerStates).map(([finger, state]) => (
-                <div key={finger} className="text-center">
-                  <div className={`w-8 h-8 rounded-full mx-auto mb-1 flex items-center justify-center ${
-                    state.extended ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                  }`}>
-                    {finger.charAt(0).toUpperCase()}
-                  </div>
-                  <p className={`font-medium ${
-                    state.extended ? 'text-green-600' : 'text-red-600'
-                  }`}>
-                    {state.extended ? 'Extended' : 'Closed'}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* LLM Evaluation */}
-          {llmResult && (
-            <div className={`rounded-lg p-3 border ${
-              llmResult.isCorrect ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'
-            }`}>
-              <h4 className={`font-semibold mb-2 ${
-                llmResult.isCorrect ? 'text-green-800' : 'text-orange-800'
-              }`}>
-                AI Analysis: {llmResult.isCorrect ? '✅ Correct Gesture' : '⚠️ Needs Improvement'}
-              </h4>
-              <p className={`text-sm mb-2 ${
-                llmResult.isCorrect ? 'text-green-700' : 'text-orange-700'
-              }`}>
-                {llmResult.reasoning}
-              </p>
-              {llmResult.feedback.length > 0 && (
-                <div className="mt-2">
-                  <p className={`font-medium mb-1 ${
-                    llmResult.isCorrect ? 'text-green-700' : 'text-orange-700'
-                  }`}>
-                    {llmResult.isCorrect ? 'Great job!' : 'Suggestions:'}
-                  </p>
-                  <ul className={`text-xs space-y-1 ${
-                    llmResult.isCorrect ? 'text-green-600' : 'text-orange-600'
-                  }`}>
-                    {llmResult.feedback.slice(0, 3).map((tip, index) => (
-                      <li key={index} className="flex items-start">
-                        <span className="mr-1">•</span>
-                        <span>{tip}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Tips */}
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-            <h4 className="font-semibold text-blue-800 mb-2">💡 How it works</h4>
-            <ul className="text-sm text-blue-700 space-y-1">
-              <li>• Hold your hand steady in the center</li>
-              <li>• Make the correct sign for letter "{targetLetter}"</li>
-              <li>• Keep it stable for 2 frames</li>
-              <li>• AI will analyze and confirm if correct</li>
-              <li>• Move to next letter when confirmed</li>
-            </ul>
-          </div>
-        </div>
-      )}
+      {/* Tips */}
+      <div className="mt-4 bg-blue-50 border border-blue-200 rounded-lg p-3">
+        <h4 className="font-semibold text-blue-800 mb-2">💡 How it works</h4>
+        <ul className="text-sm text-blue-700 space-y-1">
+          <li>• Place your hand in the center circle</li>
+          <li>• Follow the finger guide below for letter "{targetLetter}"</li>
+          <li>• Green circles = fingers should be OPEN</li>
+          <li>• Red circles = fingers should be CLOSED</li>
+          <li>• Keep it stable for {STABILITY_DURATION / 1000} seconds</li>
+          <li>• System will automatically advance when correct</li>
+        </ul>
+      </div>
 
       {/* Camera Status */}
       <div className="mt-4 flex justify-between items-center">

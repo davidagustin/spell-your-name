@@ -34,7 +34,7 @@ export default function NameInput({ onSubmit }: NameInputProps) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Enter your name here..."
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
+            className="w-full px-4 py-3 border-2 border-gray-400 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-lg text-gray-900 placeholder-gray-600 bg-white shadow-sm"
             autoFocus
             aria-describedby="name-help"
           />

@@ -26,14 +26,15 @@
 
 ### 🤖 **Advanced AI Technology**
 - **Computer Vision**: Real-time hand tracking using MediaPipe Hands API
-- **LLM-Powered Analysis**: AI evaluates gesture accuracy with detailed feedback
-- **3D Hand Analysis**: Advanced finger position detection using 3D coordinates
-- **Smart Recognition**: Learns from your hand movements and provides personalized tips
+- **Finger State Detection**: Precise open/closed finger state recognition
+- **Visual Hand Tracking**: Color-coded landmarks and connections (green=open, red=closed)
+- **Smart Recognition**: Circle-based detection with stability validation
 
 ### 🎨 **Beautiful User Interface**
 - **Modern Design**: Clean, responsive interface with smooth animations
 - **Visual Guides**: Clear hand positioning guides and target indicators
 - **Real-time Feedback**: Color-coded status indicators and progress bars
+- **Full Screen Mode**: YouTube-style full screen button for immersive experience
 - **Accessibility**: High contrast design and clear visual cues
 
 ### 📚 **Comprehensive Learning Tools**

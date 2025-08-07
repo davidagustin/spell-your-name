@@ -58,6 +58,14 @@ export default function Home() {
 
   const handleReset = () => {
     setLearningState({
+      userName: learningState.userName, // Keep the same name
+      currentLetterIndex: 0,
+      isLearning: true // Start learning again immediately
+    });
+  };
+
+  const handleNewName = () => {
+    setLearningState({
       userName: '',
       currentLetterIndex: 0,
       isLearning: false
@@ -102,6 +110,7 @@ export default function Home() {
                 currentLetterIndex={currentLetterIndex}
                 onNextLetter={handleNextLetter}
                 onReset={handleReset}
+                onNewName={handleNewName}
               />
 
               {isLearning ? (
@@ -119,12 +128,20 @@ export default function Home() {
                     <p className="text-lg text-gray-700 mb-4">
                       You successfully spelled "{userName}" in sign language!
                     </p>
-                    <button
-                      onClick={handleReset}
-                      className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg transition-colors text-lg"
-                    >
-                      Try Another Name
-                    </button>
+                    <div className="flex gap-4 justify-center">
+                      <button
+                        onClick={handleReset}
+                        className="bg-green-500 hover:bg-green-600 text-white px-6 py-3 rounded-lg transition-colors text-lg"
+                      >
+                        Practice Again
+                      </button>
+                      <button
+                        onClick={handleNewName}
+                        className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg transition-colors text-lg"
+                      >
+                        New Name
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -145,9 +162,10 @@ interface ProgressCardProps {
   currentLetterIndex: number;
   onNextLetter: () => void;
   onReset: () => void;
+  onNewName: () => void;
 }
 
-function ProgressCard({ userName, currentLetterIndex, onNextLetter, onReset }: ProgressCardProps) {
+function ProgressCard({ userName, currentLetterIndex, onNextLetter, onReset, onNewName }: ProgressCardProps) {
   return (
     <div className="bg-white rounded-lg shadow-lg p-6">
       <h2 className="text-2xl font-semibold mb-4 text-gray-800">
@@ -190,9 +208,15 @@ function ProgressCard({ userName, currentLetterIndex, onNextLetter, onReset }: P
         </button>
         <button
           onClick={onReset}
+          className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg transition-colors"
+        >
+          Practice Again
+        </button>
+        <button
+          onClick={onNewName}
           className="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition-colors"
         >
-          Start Over
+          New Name
         </button>
       </div>
     </div>
