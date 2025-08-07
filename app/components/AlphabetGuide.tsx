@@ -4,7 +4,13 @@ interface AlphabetGuideProps {
   currentLetter: string;
 }
 
-const signLanguageAlphabet = {
+interface SignLanguageLetter {
+  description: string;
+  image: string;
+  tips: string;
+}
+
+const signLanguageAlphabet: Record<string, SignLanguageLetter> = {
   A: {
     description: "Make a fist with your thumb on the side",
     image: "/signs/A.svg",
@@ -138,7 +144,7 @@ const signLanguageAlphabet = {
 };
 
 export default function AlphabetGuide({ currentLetter }: AlphabetGuideProps) {
-  const currentSign = signLanguageAlphabet[currentLetter as keyof typeof signLanguageAlphabet];
+  const currentSign = signLanguageAlphabet[currentLetter];
 
   return (
     <div className="space-y-6">
@@ -147,66 +153,92 @@ export default function AlphabetGuide({ currentLetter }: AlphabetGuideProps) {
       </h2>
       
       {currentSign && (
-        <div className="bg-blue-50 rounded-lg p-6 mb-6">
-          <h3 className="text-xl font-semibold text-blue-800 mb-3">
-            Current Letter: {currentLetter}
-          </h3>
-                     <div className="flex items-center space-x-4">
-             <div className="w-24 h-24 bg-white rounded-lg border-2 border-blue-300 flex items-center justify-center">
-               <img 
-                 src={currentSign.image} 
-                 alt={`Sign language for letter ${currentLetter}`}
-                 className="w-20 h-20 object-contain"
-               />
-             </div>
-             <div className="flex-1">
-               <p className="text-gray-700 mb-2">
-                 <strong>How to sign:</strong> {currentSign.description}
-               </p>
-               <p className="text-sm text-gray-600">
-                 <strong>Tip:</strong> {currentSign.tips}
-               </p>
-             </div>
-           </div>
-        </div>
+        <CurrentLetterCard letter={currentLetter} sign={currentSign} />
       )}
 
-             <div className="grid grid-cols-5 gap-2">
-         {Object.entries(signLanguageAlphabet).map(([letter, sign]) => (
-           <div
-             key={letter}
-             className={`p-3 rounded-lg border-2 text-center transition-colors ${
-               letter === currentLetter
-                 ? 'border-blue-500 bg-blue-100'
-                 : 'border-gray-200 bg-gray-50 hover:border-gray-300'
-             }`}
-           >
-             <div className="text-lg font-bold text-gray-800 mb-1">
-               {letter}
-             </div>
-             <div className="w-12 h-12 mx-auto bg-white rounded border flex items-center justify-center">
-               <img 
-                 src={sign.image} 
-                 alt={`Sign language for letter ${letter}`}
-                 className="w-10 h-10 object-contain"
-               />
-             </div>
-             <div className="text-xs text-gray-600 mt-1">
-               {sign.description.split(' ').slice(0, 3).join(' ')}...
-             </div>
-           </div>
-         ))}
-       </div>
+      <AlphabetGrid currentLetter={currentLetter} />
+      <TipsSection />
+    </div>
+  );
+}
 
-      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-        <h4 className="font-semibold text-yellow-800 mb-2">💡 Tips for Success</h4>
-        <ul className="text-sm text-yellow-700 space-y-1">
-          <li>• Make sure your hand is clearly visible to the camera</li>
-          <li>• Keep your hand steady and well-lit</li>
-          <li>• Practice the sign a few times before trying</li>
-          <li>• Position your hand about 12-18 inches from the camera</li>
-        </ul>
+interface CurrentLetterCardProps {
+  letter: string;
+  sign: SignLanguageLetter;
+}
+
+function CurrentLetterCard({ letter, sign }: CurrentLetterCardProps) {
+  return (
+    <div className="bg-blue-50 rounded-lg p-6 mb-6">
+      <h3 className="text-xl font-semibold text-blue-800 mb-3">
+        Current Letter: {letter}
+      </h3>
+      <div className="flex items-center space-x-4">
+        <div className="w-24 h-24 bg-white rounded-lg border-2 border-blue-300 flex items-center justify-center">
+          <img 
+            src={sign.image} 
+            alt={`Sign language for letter ${letter}`}
+            className="w-20 h-20 object-contain"
+          />
+        </div>
+        <div className="flex-1">
+          <p className="text-gray-700 mb-2">
+            <strong>How to sign:</strong> {sign.description}
+          </p>
+          <p className="text-sm text-gray-600">
+            <strong>Tip:</strong> {sign.tips}
+          </p>
+        </div>
       </div>
+    </div>
+  );
+}
+
+interface AlphabetGridProps {
+  currentLetter: string;
+}
+
+function AlphabetGrid({ currentLetter }: AlphabetGridProps) {
+  return (
+    <div className="grid grid-cols-5 gap-2">
+      {Object.entries(signLanguageAlphabet).map(([letter, sign]) => (
+        <div
+          key={letter}
+          className={`p-3 rounded-lg border-2 text-center transition-colors ${
+            letter === currentLetter
+              ? 'border-blue-500 bg-blue-100'
+              : 'border-gray-200 bg-gray-50 hover:border-gray-300'
+          }`}
+        >
+          <div className="text-lg font-bold text-gray-800 mb-1">
+            {letter}
+          </div>
+          <div className="w-12 h-12 mx-auto bg-white rounded border flex items-center justify-center">
+            <img 
+              src={sign.image} 
+              alt={`Sign language for letter ${letter}`}
+              className="w-10 h-10 object-contain"
+            />
+          </div>
+          <div className="text-xs text-gray-600 mt-1">
+            {sign.description.split(' ').slice(0, 3).join(' ')}...
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TipsSection() {
+  return (
+    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+      <h4 className="font-semibold text-yellow-800 mb-2">💡 Tips for Success</h4>
+      <ul className="text-sm text-yellow-700 space-y-1">
+        <li>• Make sure your hand is clearly visible to the camera</li>
+        <li>• Keep your hand steady and well-lit</li>
+        <li>• Practice the sign a few times before trying</li>
+        <li>• Position your hand about 12-18 inches from the camera</li>
+      </ul>
     </div>
   );
 } 

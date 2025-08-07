@@ -9,12 +9,14 @@ interface NameInputProps {
 export default function NameInput({ onSubmit }: NameInputProps) {
   const [name, setName] = useState('');
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (name.trim()) {
       onSubmit(name.trim());
     }
   };
+
+  const isNameValid = name.trim().length > 0;
 
   return (
     <div className="max-w-md mx-auto bg-white rounded-lg shadow-lg p-8">
@@ -34,19 +36,21 @@ export default function NameInput({ onSubmit }: NameInputProps) {
             placeholder="Enter your name here..."
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
             autoFocus
+            aria-describedby="name-help"
           />
+          <p id="name-help" className="text-sm text-gray-500 mt-1">
+            We'll help you learn to spell your name in American Sign Language!
+          </p>
         </div>
         <button
           type="submit"
-          disabled={!name.trim()}
+          disabled={!isNameValid}
           className="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition-colors"
+          aria-label="Start learning sign language for your name"
         >
           Start Learning
         </button>
       </form>
-      <p className="text-sm text-gray-500 text-center mt-4">
-        We'll help you learn to spell your name in American Sign Language!
-      </p>
     </div>
   );
 } 

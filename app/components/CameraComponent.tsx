@@ -8,6 +8,17 @@ interface CameraComponentProps {
   isActive: boolean;
 }
 
+interface HandLandmark {
+  x: number;
+  y: number;
+  z: number;
+}
+
+interface GestureResult {
+  letter: string;
+  feedback: string[];
+}
+
 export default function CameraComponent({ targetLetter, onCorrectGesture, isActive }: CameraComponentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -17,7 +28,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
   const [isCorrect, setIsCorrect] = useState(false);
   const [detectionCount, setDetectionCount] = useState<number>(0);
   const [lastDetectedLetter, setLastDetectedLetter] = useState<string | null>(null);
-  const [fingerFeedback, setFingerFeedback] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isActive) {
@@ -30,6 +41,8 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
 
     const initializeCamera = async () => {
       try {
+        setError(null);
+        
         // Dynamically import MediaPipe modules
         const { Hands } = await import('@mediapipe/hands');
         const { Camera } = await import('@mediapipe/camera_utils');
@@ -43,27 +56,18 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
 
         hands.setOptions({
           maxNumHands: 1,
-          modelComplexity: 0, // Use simpler model for better performance
-          minDetectionConfidence: 0.5, // Lower threshold to detect hands more easily
-          minTrackingConfidence: 0.5,  // Lower threshold for tracking
-          refineLandmarks: false        // Disable for better performance
+          modelComplexity: 0,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+          refineLandmarks: false
         });
 
         hands.onResults((results: any) => {
-          console.log('MediaPipe results:', results.multiHandLandmarks ? results.multiHandLandmarks.length : 'No hands');
-          
           if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
             const landmarks = results.multiHandLandmarks[0];
             const result = classifyHandGesture(landmarks);
             const letter = result.letter;
-            const feedback = result.feedback;
             
-            console.log('Detected letter:', letter, 'Target:', targetLetter);
-            
-            // Update finger feedback immediately
-            setFingerFeedback(feedback);
-            
-            // Show detection immediately for better feedback
             setDetectedLetter(letter);
             
             // Add stability check - require consistent detection for confidence
@@ -90,55 +94,15 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
               setIsCorrect(false);
             }
           } else {
-            console.log('No hand detected');
             setDetectedLetter(null);
             setConfidence(0);
             setIsCorrect(false);
             setDetectionCount(0);
             setLastDetectedLetter(null);
-            setFingerFeedback([]);
           }
 
           // Draw hand landmarks
-          if (canvasRef.current && videoRef.current) {
-            const canvasCtx = canvasRef.current.getContext('2d');
-            if (canvasCtx) {
-              canvasCtx.save();
-              canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-              canvasCtx.drawImage(results.image, 0, 0, canvasRef.current.width, canvasRef.current.height);
-              
-              if (results.multiHandLandmarks) {
-                for (const landmarks of results.multiHandLandmarks) {
-                  // Draw hand connections manually since HAND_CONNECTIONS might not be available
-                  const connections = [
-                    [0, 1], [1, 2], [2, 3], [3, 4], // thumb
-                    [0, 5], [5, 6], [6, 7], [7, 8], // index
-                    [0, 9], [9, 10], [10, 11], [11, 12], // middle
-                    [0, 13], [13, 14], [14, 15], [15, 16], // ring
-                    [0, 17], [17, 18], [18, 19], [19, 20], // pinky
-                    [0, 5], [5, 9], [9, 13], [13, 17] // palm connections
-                  ];
-                  
-                  connections.forEach(([start, end]) => {
-                    const startPoint = landmarks[start];
-                    const endPoint = landmarks[end];
-                    canvasCtx.beginPath();
-                    canvasCtx.moveTo(startPoint.x * canvasRef.current!.width, startPoint.y * canvasRef.current!.height);
-                    canvasCtx.lineTo(endPoint.x * canvasRef.current!.width, endPoint.y * canvasRef.current!.height);
-                    canvasCtx.strokeStyle = isCorrect ? '#00FF00' : '#FF0000';
-                    canvasCtx.lineWidth = 2;
-                    canvasCtx.stroke();
-                  });
-                  drawLandmarks(canvasCtx, landmarks, {
-                    color: isCorrect ? '#00FF00' : '#FF0000',
-                    lineWidth: 1,
-                    radius: 3
-                  });
-                }
-              }
-              canvasCtx.restore();
-            }
-          }
+          drawHandLandmarks(results);
         });
 
         camera = new Camera(videoRef.current!, {
@@ -155,6 +119,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
         setIsCameraActive(true);
       } catch (error) {
         console.error('Error initializing camera:', error);
+        setError('Failed to initialize camera. Please check permissions and try again.');
       }
     };
 
@@ -166,11 +131,46 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
       }
       setIsCameraActive(false);
     };
-  }, [isActive, targetLetter, onCorrectGesture]);
+  }, [isActive, targetLetter, onCorrectGesture, lastDetectedLetter, detectionCount]);
 
-  const classifyHandGesture = (landmarks: any[]): { letter: string, feedback: string[] } => {
-    // Improved gesture classification with better accuracy and feedback
+  const drawHandLandmarks = (results: any) => {
+    if (!canvasRef.current || !videoRef.current) return;
+
+    const canvasCtx = canvasRef.current.getContext('2d');
+    if (!canvasCtx) return;
+
+    canvasCtx.save();
+    canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    canvasCtx.drawImage(results.image, 0, 0, canvasRef.current.width, canvasRef.current.height);
     
+    if (results.multiHandLandmarks) {
+      for (const landmarks of results.multiHandLandmarks) {
+        // Draw hand connections
+        const connections = [
+          [0, 1], [1, 2], [2, 3], [3, 4], // thumb
+          [0, 5], [5, 6], [6, 7], [7, 8], // index
+          [0, 9], [9, 10], [10, 11], [11, 12], // middle
+          [0, 13], [13, 14], [14, 15], [15, 16], // ring
+          [0, 17], [17, 18], [18, 19], [19, 20], // pinky
+          [0, 5], [5, 9], [9, 13], [13, 17] // palm connections
+        ];
+        
+        connections.forEach(([start, end]) => {
+          const startPoint = landmarks[start];
+          const endPoint = landmarks[end];
+          canvasCtx.beginPath();
+          canvasCtx.moveTo(startPoint.x * canvasRef.current!.width, startPoint.y * canvasRef.current!.height);
+          canvasCtx.lineTo(endPoint.x * canvasRef.current!.width, endPoint.y * canvasRef.current!.height);
+          canvasCtx.strokeStyle = isCorrect ? '#00FF00' : '#FF0000';
+          canvasCtx.lineWidth = 2;
+          canvasCtx.stroke();
+        });
+      }
+    }
+    canvasCtx.restore();
+  };
+
+  const classifyHandGesture = (landmarks: HandLandmark[]): GestureResult => {
     // Define finger landmarks
     const fingerTips = [4, 8, 12, 16, 20]; // Thumb, Index, Middle, Ring, Pinky
     const fingerBases = [2, 5, 9, 13, 17];
@@ -183,8 +183,8 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
       const baseY = landmarks[fingerBases[index]].y;
       const midY = landmarks[fingerMids[index]].y;
       
-      // More precise finger detection
-      const isExtended = tipY < baseY - 0.02; // Add threshold for better accuracy
+      // More lenient detection for better accuracy
+      const isExtended = tipY < baseY - 0.01; // Reduced threshold
       const isPartiallyExtended = tipY < midY;
       
       return { extended: isExtended, partial: isPartiallyExtended };
@@ -192,32 +192,32 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
 
     // Enhanced gesture patterns with more specific detection
     const gestures: { [key: string]: { pattern: boolean[], confidence: number } } = {
-      'A': { pattern: [false, false, false, false, false], confidence: 0.8 }, // All fingers closed
-      'B': { pattern: [false, true, true, true, true], confidence: 0.85 },     // All fingers except thumb extended
-      'C': { pattern: [false, false, false, false, false], confidence: 0.7 }, // Curved fingers
-      'D': { pattern: [false, true, false, false, false], confidence: 0.9 },  // Only index finger
-      'E': { pattern: [false, false, false, false, false], confidence: 0.8 }, // All fingers closed
-      'F': { pattern: [false, true, true, false, false], confidence: 0.85 },   // Index and middle extended
-      'G': { pattern: [false, true, false, false, false], confidence: 0.9 },  // Only index finger
-      'H': { pattern: [false, true, true, false, false], confidence: 0.85 },   // Index and middle extended
-      'I': { pattern: [false, false, false, false, true], confidence: 0.9 },  // Only pinky
-      'J': { pattern: [false, false, false, false, true], confidence: 0.9 },  // Only pinky
-      'K': { pattern: [false, true, true, false, false], confidence: 0.85 },   // Index and middle extended
-      'L': { pattern: [true, true, false, false, false], confidence: 0.9 },   // Thumb and index
-      'M': { pattern: [false, false, false, false, false], confidence: 0.7 }, // Three fingers on thumb
-      'N': { pattern: [false, false, false, false, false], confidence: 0.7 }, // Two fingers on thumb
-      'O': { pattern: [false, false, false, false, false], confidence: 0.7 }, // All fingers curved
-      'P': { pattern: [false, false, true, false, false], confidence: 0.8 },  // Middle finger down
-      'Q': { pattern: [false, true, false, false, false], confidence: 0.8 },  // Index finger down
-      'R': { pattern: [false, true, true, false, false], confidence: 0.8 },   // Crossed fingers
-      'S': { pattern: [false, false, false, false, false], confidence: 0.8 }, // Fist
-      'T': { pattern: [false, false, false, false, false], confidence: 0.7 }, // Thumb between fingers
-      'U': { pattern: [false, true, true, false, false], confidence: 0.85 },   // Index and middle together
-      'V': { pattern: [false, true, true, false, false], confidence: 0.85 },   // Index and middle apart
-      'W': { pattern: [false, true, true, true, false], confidence: 0.9 },    // Three fingers
-      'X': { pattern: [false, true, false, false, false], confidence: 0.8 },  // Bent index
-      'Y': { pattern: [false, false, false, false, true], confidence: 0.9 },  // Thumb and pinky
-      'Z': { pattern: [false, true, false, false, false], confidence: 0.8 }   // Index finger
+      'A': { pattern: [false, false, false, false, false], confidence: 0.8 },
+      'B': { pattern: [false, true, true, true, true], confidence: 0.85 },
+      'C': { pattern: [false, false, false, false, false], confidence: 0.7 },
+      'D': { pattern: [false, true, false, false, false], confidence: 0.9 },
+      'E': { pattern: [false, false, false, false, false], confidence: 0.8 },
+      'F': { pattern: [false, true, true, false, false], confidence: 0.85 },
+      'G': { pattern: [false, true, false, false, false], confidence: 0.9 },
+      'H': { pattern: [false, true, true, false, false], confidence: 0.85 },
+      'I': { pattern: [false, false, false, false, true], confidence: 0.9 },
+      'J': { pattern: [false, false, false, false, true], confidence: 0.9 },
+      'K': { pattern: [false, true, true, false, false], confidence: 0.85 },
+      'L': { pattern: [true, true, false, false, false], confidence: 0.9 },
+      'M': { pattern: [false, false, false, false, false], confidence: 0.7 },
+      'N': { pattern: [false, false, false, false, false], confidence: 0.7 },
+      'O': { pattern: [false, false, false, false, false], confidence: 0.7 },
+      'P': { pattern: [false, false, true, false, false], confidence: 0.8 },
+      'Q': { pattern: [false, true, false, false, false], confidence: 0.8 },
+      'R': { pattern: [false, true, true, false, false], confidence: 0.8 },
+      'S': { pattern: [false, false, false, false, false], confidence: 0.8 },
+      'T': { pattern: [false, false, false, false, false], confidence: 0.7 },
+      'U': { pattern: [false, true, true, false, false], confidence: 0.85 },
+      'V': { pattern: [false, true, true, false, false], confidence: 0.85 },
+      'W': { pattern: [false, true, true, true, false], confidence: 0.9 },
+      'X': { pattern: [false, true, false, false, false], confidence: 0.8 },
+      'Y': { pattern: [false, false, false, false, true], confidence: 0.9 },
+      'Z': { pattern: [false, true, false, false, false], confidence: 0.8 }
     };
 
     // Enhanced matching algorithm with feedback
@@ -229,7 +229,6 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
       const pattern = gesture.pattern;
       const confidence = gesture.confidence;
       
-      // Calculate pattern match score and collect feedback
       let patternScore = 0;
       const letterFeedback: string[] = [];
       
@@ -256,10 +255,15 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
       }
     }
 
-    // Add stability check - require higher confidence for detection
+    console.log('Classification debug:', {
+      bestMatch,
+      bestScore,
+      fingerStates: fingerStates.map((state, i) => ({ finger: fingerNames[i], extended: state.extended }))
+    });
+
     return {
-      letter: bestScore > 0.7 ? bestMatch : 'A',
-      feedback: bestScore > 0.7 ? feedback : ['Position your hand in the center', 'Make sure all fingers are visible']
+      letter: bestScore > 0.3 ? bestMatch : 'A', // Lower threshold for detection
+      feedback: bestScore > 0.3 ? feedback : ['Position your hand in the center', 'Make sure all fingers are visible']
     };
   };
 
@@ -278,6 +282,12 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
     <div className="bg-white rounded-lg shadow-lg p-6">
       <h3 className="text-xl font-semibold mb-4 text-gray-800">Camera</h3>
       
+      {error && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+          <p className="text-sm text-red-700">{error}</p>
+        </div>
+      )}
+      
       <div className="relative">
         <video
           ref={videoRef}
@@ -293,7 +303,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
           height={480}
         />
         
-        {/* Minimal Target Display - Top Left */}
+        {/* Target Display */}
         <div className="absolute top-4 left-4 bg-black bg-opacity-70 rounded-lg p-2 text-white">
           <div className="text-center">
             <p className="text-xs font-semibold mb-1">Target</p>
@@ -301,174 +311,14 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
           </div>
         </div>
         
-        {/* Minimal Hand Positioning Guide */}
+        {/* Hand Positioning Guide */}
         <div className="absolute inset-0 pointer-events-none">
           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
             <div className="w-32 h-32 border border-dashed border-white rounded-full opacity-30"></div>
-            
-            {/* Red Wireframe Guide for Target Letter */}
-            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-32 h-32">
-              {targetLetter === 'A' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 80 L50 20 L80 80 M30 60 L70 60" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <circle cx="50" cy="85" r="8" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                </svg>
-              )}
-              {targetLetter === 'B' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 35 L70 35 M20 50 L70 50 M20 65 L70 65" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                </svg>
-              )}
-              {targetLetter === 'C' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M30 20 Q50 20 70 40 Q70 60 50 80 Q30 80 20 60 Q20 40 30 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'D' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <circle cx="50" cy="30" r="15" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                  <path d="M50 30 L50 70" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'E' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 35 L70 35 M20 50 L70 50 M20 65 L70 65" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                </svg>
-              )}
-              {targetLetter === 'F' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <circle cx="50" cy="30" r="15" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                  <path d="M50 30 L50 70" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'G' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <circle cx="50" cy="30" r="15" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                  <path d="M50 30 L50 70" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'H' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M80 20 L80 80 M20 50 L80 50" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'I' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <circle cx="50" cy="30" r="15" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                  <path d="M50 30 L50 70" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'J' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M50 30 Q70 50 50 70 Q30 50 50 30" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'K' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 L80 80 M20 80 L80 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'L' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'M' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M30 20 L30 80 M50 20 L50 80 M70 20 L70 80" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                </svg>
-              )}
-              {targetLetter === 'N' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M30 20 L30 80 M70 20 L70 80" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                </svg>
-              )}
-              {targetLetter === 'O' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <ellipse cx="50" cy="50" rx="25" ry="35" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'P' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 Q50 20 80 20 Q80 50 50 50 Q20 50 20 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'Q' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 Q50 20 80 20 Q80 50 50 50 Q20 50 20 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'R' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 L80 80 M20 80 L80 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'S' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 Q50 20 80 20 Q80 50 50 50 Q20 50 20 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'T' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M50 20 L50 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'U' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M80 20 L80 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'V' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M80 20 L80 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 L50 50 L80 20" stroke="red" strokeWidth="2" fill="none" strokeDasharray="3,3"/>
-                </svg>
-              )}
-              {targetLetter === 'W' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M40 20 L40 80 M60 20 L60 80 M80 20 L80 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'X' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 L80 80 M20 80 L80 20" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'Y' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L20 80 M80 20 L80 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 80 L80 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-              {targetLetter === 'Z' && (
-                <svg viewBox="0 0 100 100" className="w-full h-full opacity-70">
-                  <path d="M20 20 L80 20 L80 80 L20 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                  <path d="M20 20 L80 80" stroke="red" strokeWidth="3" fill="none" strokeDasharray="5,5"/>
-                </svg>
-              )}
-            </div>
           </div>
         </div>
         
-
-        
-        {/* Simple Status Display - Top Right */}
+        {/* Status Display */}
         <div className="absolute top-4 right-4 bg-black bg-opacity-70 rounded-lg p-2 text-white">
           <div className="text-center">
             <p className="text-xs font-semibold mb-1">Detected</p>
@@ -480,7 +330,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
           </div>
         </div>
         
-        {/* Minimal Progress Indicator - Bottom */}
+        {/* Progress Indicator */}
         <div className="absolute bottom-4 left-4 right-4">
           <div className="bg-black bg-opacity-70 rounded-lg p-2 text-white">
             <div className="flex items-center justify-between mb-1">
@@ -500,6 +350,15 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
                detectionCount >= 1 ? 'Good! Keep holding...' : 
                'Position your hand'}
             </p>
+            
+            {/* Debug Info */}
+            <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
+              <p className="font-semibold text-yellow-800">Debug:</p>
+              <p>Hand: {detectedLetter || 'None'}</p>
+              <p>Target: {targetLetter}</p>
+              <p>Count: {detectionCount}/3</p>
+              <p>Confidence: {confidence.toFixed(2)}</p>
+            </div>
           </div>
         </div>
       </div>
@@ -527,7 +386,7 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
         </div>
       </div>
 
-      {!isCameraActive && (
+      {!isCameraActive && !error && (
         <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
           <p className="text-sm text-yellow-700">
             Please allow camera access to start hand gesture recognition.
@@ -537,8 +396,6 @@ export default function CameraComponent({ targetLetter, onCorrectGesture, isActi
 
       {isCameraActive && (
         <div className="mt-4 space-y-3">
-
-          
           {/* Tips */}
           <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
             <h4 className="font-semibold text-blue-800 mb-2">💡 Tips for Better Detection</h4>
